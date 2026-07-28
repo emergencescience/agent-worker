@@ -169,6 +169,7 @@ async def get_project_endpoint(project_id: str):
                 "competitor_visibility": report.competitor_visibility,
                 "review_visibility": report.review_visibility,
                 "recommendations": report.recommendations,
+                "competitor_benchmark": report.competitor_benchmark or {},
             } if report else None,
         }
 
