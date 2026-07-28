@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 
+import asyncio
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
@@ -212,11 +214,37 @@ async def confirm_prompts_endpoint(project_id: str):
             raise HTTPException(status_code=404, detail="Project not found")
 
         await confirm_prompts(db, project_id)
+
+        # Trigger background probing
+        from services.probe_orchestrator import run_project_probes
+        asyncio.create_task(run_project_probes(project_id))
+
         return {
             "project_id": project_id,
-            "status": "prompts_ready",
-            "message": "Prompts confirmed. Ready to start multi-engine probing.",
+            "status": "probing",
+            "message": "Prompts confirmed. Multi-engine probes are running in background.",
         }
+
+
+# ── POST /projects/{id}/probe ─────────────────────────────────────
+
+
+@router.post("/{project_id}/probe")
+async def run_probes_endpoint(project_id: str):
+    """Manually trigger probing for a project."""
+    async with _get_db() as db:
+        project = await get_project(db, project_id)
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
+
+    from services.probe_orchestrator import run_project_probes
+    asyncio.create_task(run_project_probes(project_id))
+
+    return {
+        "project_id": project_id,
+        "status": "probing_started",
+        "message": "Probes running in background. Poll /projects/{id} for status.",
+    }
 
 
 # ── PATCH /projects/{id}/prompts/{prompt_id} ─────────────────────────
