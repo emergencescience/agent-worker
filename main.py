@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from routes import jobs
+from routes import jobs, projects
 from services.async_jobs import job_store
 
 load_dotenv()
@@ -66,6 +66,7 @@ def health():
 
 # Include routers
 app.include_router(jobs.router)
+app.include_router(projects.router)
 
 if __name__ == "__main__":
     import uvicorn
