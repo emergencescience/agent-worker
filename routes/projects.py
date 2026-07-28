@@ -100,6 +100,7 @@ def _prompt_to_dict(p) -> dict:
 def _result_to_dict(r) -> dict:
     return {
         "id": r.id,
+        "search_prompt_id": r.search_prompt_id,
         "engine": r.engine,
         "total_results": r.total_results,
         "brand_mentions": r.brand_mentions,
