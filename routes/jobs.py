@@ -12,6 +12,7 @@ from services.async_jobs import JobStatus, job_store, job_to_dict
 from services.auth import authenticate
 from services.geo_audit import run_geo_audit
 from services.geo_interview import run_geo_interview
+from services.tavily_monitor import run_tavily_geo_monitor
 
 logger = logging.getLogger("jobs_api")
 
@@ -91,6 +92,46 @@ async def create_geo_interview(body: GeoInterviewRequest, _token: None = Depends
             )
         except Exception as e:
             logger.exception(f"GEO interview job {job.id} failed: {e}")
+            await job_store.fail(job.id, str(e))
+
+    asyncio.create_task(_run())
+
+    return {"job_id": job.id, "status": JobStatus.QUEUED.value}
+
+
+# ── POST /jobs/geo-monitor ──────────────────────────────────────
+
+
+class GeoMonitorRequest(BaseModel):
+    brand: str
+    url: str | None = None
+    keywords: list[str] | None = None
+    competitors: list[str] | None = None
+    lang: str = "zh"
+    user_id: str | None = None
+    session_id: str | None = None
+
+
+@router.post("/geo-monitor")
+async def create_geo_monitor(body: GeoMonitorRequest, _token: None = Depends(authenticate)):
+    """Launch Tavily GEO monitor → search-based brand visibility tracking."""
+    if not body.brand:
+        raise HTTPException(status_code=400, detail="brand is required")
+
+    job = await job_store.create("geo_monitor")
+
+    async def _run():
+        try:
+            await run_tavily_geo_monitor(
+                job=job,
+                brand=body.brand,
+                url=body.url,
+                keywords=body.keywords,
+                competitors=body.competitors,
+                lang=body.lang,
+            )
+        except Exception as e:
+            logger.exception(f"GEO monitor job {job.id} failed: {e}")
             await job_store.fail(job.id, str(e))
 
     asyncio.create_task(_run())
