@@ -417,63 +417,81 @@ async def generate_report(db: AsyncSession, project_id: str) -> ProjectReport:
     user_comp = _avg_visibility(by_template.get("user_comparison", []))
     user_alt = _avg_visibility(by_template.get("user_alternatives", []))
 
-    # Compute engine-specific scores
+    # Compute engine-specific scores (separated by type)
     engine_scores = {}
+    search_engines = []
+    awareness_engines = []
     for eng, entries in by_engine.items():
         engine_scores[eng] = round(_avg_visibility(entries) * 100, 1)
-
-    # Overall: average of all template scores
-    all_scores = [branded, category, competitor, review, user_disc, user_comp, user_alt]
-    valid_scores = [s for s in all_scores if s > 0 or any(
-        r.visibility_score > 0 for r in by_template.get(
-            {0: "brand_direct", 1: "category_discovery", 2: "competitor_comparison",
-             3: "brand_review", 4: "user_discovery", 5: "user_comparison",
-             6: "user_alternatives"}.get(all_scores.index(s), ""), []
+        # Determine engine type (check raw_response for awareness note)
+        is_awareness = any(
+            (e.raw_response or {}).get("note") == "base_llm_awareness"
+            for e in entries
         )
-    )]
+        if is_awareness or eng in ("deepseek", "doubao"):
+            awareness_engines.append(eng)
+        else:
+            search_engines.append(eng)
+
+    # Overall: average of template scores weighted by engine type
+    all_scores = [branded, category, competitor, review]
+    valid_scores = [s for s in all_scores if s > 0]
     if valid_scores:
         overall = sum(valid_scores) / len(valid_scores) * 100
     else:
-        overall = sum(all_scores) / len(all_scores) * 100 if all_scores else 0.0
+        overall = 0.0
 
-    # Generate recommendations
+    # Generate recommendations — distinguish search vs awareness
     recommendations = []
-    if branded < 0.3:
+
+    # Search engine insights
+    search_avg = (
+        sum(engine_scores.get(e, 0) for e in search_engines) / len(search_engines)
+        if search_engines else 0
+    )
+    awareness_avg = (
+        sum(engine_scores.get(e, 0) for e in awareness_engines) / len(awareness_engines)
+        if awareness_engines else 0
+    )
+
+    if awareness_avg > 30:
         recommendations.append(
-            "品牌直接搜索可见度低。建议加强品牌官网SEO基础建设（标题、描述、结构化数据）。"
+            f"✅ AI 大模型品牌认知度 {awareness_avg:.0f}%。品牌在 LLM 训练数据中有较好覆盖。"
+        )
+    elif awareness_avg > 0:
+        recommendations.append(
+            f"⚠️ AI 大模型品牌认知度仅 {awareness_avg:.0f}%。建议增加高质量公开内容（技术博客、文档、媒体报道）以提升训练数据覆盖。"
+        )
+
+    if search_avg < 20 and awareness_avg > 30:
+        recommendations.append(
+            f"⚠️ 搜索可见度 ({search_avg:.0f}%) 远低于 LLM 认知度 ({awareness_avg:.0f}%)。"
+            "品牌在 AI 模型中有知名度，但缺乏网页内容支撑。建议建设官网、技术博客、增加外部链接。"
+        )
+    elif search_avg < 20:
+        recommendations.append(
+            "网页搜索可见度低。建议加强品牌官网 SEO 基础建设（标题、描述、结构化数据）。"
+        )
+
+    if branded < 0.1:
+        recommendations.append(
+            "品牌直接搜索几乎不可见。需要创建品牌专属内容页面，至少让搜索引擎能找到品牌名。"
         )
     if category < 0.1:
         recommendations.append(
-            "品类搜索中品牌几乎不可见。需要创建行业相关内容和外部链接。"
+            "品类搜索中品牌不可见。需要创建行业相关内容（如「最佳{行业}工具推荐」）来吸引品类流量。"
         )
     if competitor < 0.1:
         recommendations.append(
-            "竞品对比中品牌未被提及。建议创建与竞品的对比内容页面。"
+            "竞品对比中品牌未被提及。建议创建与主流竞品的对比页面。"
         )
     if review < 0.1:
         recommendations.append(
-            "品牌评价内容缺失。建议在知乎、小红书等平台引导用户生成评价。"
+            "品牌评价内容缺失。建议在知乎、小红书等平台鼓励用户生成评价内容。"
         )
 
-    # Add engine-specific insights
-    llm_engines = [e for e in by_engine if e != "tavily"]
-    web_engines = [e for e in by_engine if e == "tavily"]
-
-    if llm_engines:
-        llm_avg = sum(engine_scores.get(e, 0) for e in llm_engines) / len(llm_engines)
-        if llm_avg > 30:
-            recommendations.insert(
-                0,
-                f"✅ AI 大模型对品牌有认知 (LLM 可见度 {llm_avg:.0f}%)。品牌在训练数据中有较好覆盖。"
-            )
-
-    if web_engines:
-        web_avg = engine_scores.get("tavily", 0)
-        if web_avg < 20 and any(engine_scores.get(e, 0) > 30 for e in llm_engines):
-            recommendations.append(
-                f"⚠️ 网页搜索可见度 ({web_avg:.0f}%) 远低于 LLM 认知度。说明品牌缺乏独立网页内容，"
-                "建议建设官网、撰写技术博客、增加外部媒体报道。"
-            )
+    # Cap recommendations at 5
+    recommendations = recommendations[:5]
 
     # Discover competitors from results
     discovered_competitors = []
