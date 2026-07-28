@@ -5,11 +5,10 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from services.async_jobs import JobStatus, job_store, job_to_dict
-from services.auth import authenticate
 from services.geo_audit import run_geo_audit
 from services.geo_interview import run_geo_interview
 from services.tavily_monitor import run_tavily_geo_monitor
@@ -45,7 +44,7 @@ class GeoInterviewRequest(BaseModel):
 
 
 @router.post("/geo-audit")
-async def create_geo_audit(body: GeoAuditRequest, _token: None = Depends(authenticate)):
+async def create_geo_audit(body: GeoAuditRequest):
     """Launch multi-LLM GEO probe → returns job_id for polling."""
     if not body.url:
         raise HTTPException(status_code=400, detail="url is required")
@@ -69,7 +68,7 @@ async def create_geo_audit(body: GeoAuditRequest, _token: None = Depends(authent
 
 
 @router.post("/geo-interview")
-async def create_geo_interview(body: GeoInterviewRequest, _token: None = Depends(authenticate)):
+async def create_geo_interview(body: GeoInterviewRequest):
     """Process one interview turn → extract structured data, return next question."""
     if not body.brand_name:
         raise HTTPException(status_code=400, detail="brand_name is required")
@@ -113,7 +112,7 @@ class GeoMonitorRequest(BaseModel):
 
 
 @router.post("/geo-monitor")
-async def create_geo_monitor(body: GeoMonitorRequest, _token: None = Depends(authenticate)):
+async def create_geo_monitor(body: GeoMonitorRequest):
     """Launch Tavily GEO monitor → search-based brand visibility tracking."""
     if not body.brand:
         raise HTTPException(status_code=400, detail="brand is required")
