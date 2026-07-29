@@ -357,18 +357,9 @@ _PROBE_ENGINES: dict[str, dict[str, Any]] = {
         "description": "AI search engine with citations",
         "probe_fn": _probe_perplexity,
     },
-    "deepseek": {
-        "label": "DeepSeek",
-        "type": "awareness",
-        "description": "Base LLM — measures brand awareness in training data",
-        "probe_fn": _probe_deepseek,
-    },
-    "doubao": {
-        "label": "豆包",
-        "type": "awareness",
-        "description": "Base LLM — measures Chinese-market brand awareness",
-        "probe_fn": _probe_doubao,
-    },
+    # NOTE: DeepSeek removed — base LLM with no search API, hallucination
+    # renders awareness scores unreliable for GEO measurements.
+    # "doubao" also removed — same issue, base LLM without search grounding.
 }
 
 
@@ -376,9 +367,7 @@ def get_available_engines() -> list[str]:
     """Return list of engine names that are configured (have API keys)."""
     keys = {
         "tavily": TAVILY_API_KEY,
-        "deepseek": DEEPSEEK_API_KEY,
         "perplexity": PERPLEXITY_API_KEY,
-        "doubao": DOUBAO_API_KEY,
         "gemini": GEMINI_API_KEY,
     }
     available = []
@@ -391,9 +380,7 @@ def get_available_engines() -> list[str]:
 def _is_engine_available(name: str) -> bool:
     keys = {
         "tavily": TAVILY_API_KEY,
-        "deepseek": DEEPSEEK_API_KEY,
         "perplexity": PERPLEXITY_API_KEY,
-        "doubao": DOUBAO_API_KEY,
         "gemini": GEMINI_API_KEY,
     }
     return bool(keys.get(name, ""))

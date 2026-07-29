@@ -94,27 +94,32 @@ async def list_projects(db: AsyncSession, user_id: str | None = None, limit: int
 # "best https://symbol.science/moon 是 月球种子工厂... 推荐 2026".
 # Now we use an LLM pass to extract a real query from the profile fields.
 
-_QUERY_GEN_SYSTEM = """You are a search query generator. Given a brand/product profile,
-generate natural search queries that real users would type into Google or an AI search engine.
+_QUERY_GEN_SYSTEM = """You are a search query generator for GEO (Generative Engine Optimization) testing.
 
-Return ONLY valid JSON, no commentary:
+GIVEN a brand/product profile, generate search queries that a REAL USER would type —
+but NEVER include the brand name, website, or product name in the queries.
+
+The test measures: "If a user searches for CATEGORY terms, does the brand appear?"
+If the query contains the brand name, the test is invalid — we're measuring SEO, not GEO.
+
+Return ONLY valid JSON:
 {
-  "brand_query": "a direct brand/product search query",
-  "category_query": "a category discovery query (e.g. 'best X for Y')",
-  "comparison_query": "a competitor comparison query",
-  "review_query": "a review/research query",
-  "user_discovery": "what a new user would search to discover this category",
-  "user_comparison": "how an evaluating user would compare",
-  "user_alternatives": "what a price-sensitive user would search for alternatives"
+  "category_query": "category discovery query (e.g. 'best tools for X', NOT brand-specific)",
+  "comparison_query": "comparison query about competing options in the space",
+  "review_query": "review/opinion query about the category or problem",
+  "user_discovery": "what a new user would search to discover this type of product",
+  "user_comparison": "how an evaluating user would compare options in this space",
+  "user_alternatives": "what a price-sensitive user would search for cheaper/different options"
 }
 
-Rules:
-- Queries must be in the project's language (zh or en)
-- Queries must sound like something a REAL USER would type — short, natural, search-engine-like
-- Do NOT embed URLs in queries
-- Do NOT include the full brand description as part of the query
-- For category queries, extract the core product category (2-5 keywords), not the entire value prop
-- If given a full URL path like symbol.science/moon, treat 'moon' as the key product name
+RULES (CRITICAL):
+- Output language must match the project language (zh or en)
+- NEVER include the brand name, domain, or product name in ANY query
+- NEVER include URLs in queries
+- Queries must be what REAL USERS type — short, natural, search-engine-like (3-8 words)
+- Extract the core product category/problem (2-5 keywords), use that
+- For 'moon seed factory' category, queries like '月球殖民 自我复制 项目' or 'moon colony von neumann probe'
+- NOT 'symbol.science moon' or 'symbol.science alternatives'
 - Make queries specific enough to find similar real-world projects/pages"""
 
 
@@ -189,23 +194,21 @@ def _fallback_queries(
 
     if lang == "zh":
         return {
-            "brand_query": brand_query,
-            "category_query": f"{product_name} 项目 推荐" if product_name != brand_name else f"{brand_name} 类似项目",
-            "comparison_query": f"{product_name} vs {competitors[0]}" if competitors else f"{product_name} 对比",
-            "review_query": f"{product_name} 怎么样 测评",
-            "user_discovery": f"{product_name} 有哪些",
-            "user_comparison": f"{product_name} 好不好用",
-            "user_alternatives": f"{product_name} 替代方案",
+            "category_query": f"{product_name} 项目 推荐 2026",
+            "comparison_query": f"{product_name} 对比 有哪些选择",
+            "review_query": f"{product_name} 测评 哪个好",
+            "user_discovery": f"{product_name} 怎么找",
+            "user_comparison": f"{product_name} 好不好 值得吗",
+            "user_alternatives": f"{product_name} 替代方案 平替",
         }
     else:
         return {
-            "brand_query": brand_query,
-            "category_query": f"best {product_name} projects 2026" if product_name != brand_name else f"alternatives to {brand_name}",
-            "comparison_query": f"{product_name} vs {competitors[0]}" if competitors else f"{product_name} comparison",
-            "review_query": f"{product_name} review",
-            "user_discovery": f"what are good {product_name} tools",
-            "user_comparison": f"{product_name} worth it",
-            "user_alternatives": f"{product_name} alternatives",
+            "category_query": f"best {product_name} projects 2026",
+            "comparison_query": f"{product_name} comparison alternatives",
+            "review_query": f"{product_name} review worth it",
+            "user_discovery": f"how to find {product_name} tools",
+            "user_comparison": f"{product_name} worth it reddit",
+            "user_alternatives": f"{product_name} alternatives cheaper",
         }
 
 
@@ -238,7 +241,6 @@ async def generate_search_prompts(
 
     # Map LLM output keys → standard template_type values
     _TYPE_MAP = {
-        "brand_query": "brand_direct",
         "category_query": "category_discovery",
         "comparison_query": "competitor_comparison",
         "review_query": "brand_review",
@@ -493,7 +495,7 @@ async def generate_report(db: AsyncSession, project_id: str) -> ProjectReport:
             return 0.0
         return sum(e.visibility_score for e in entries) / len(entries)
 
-    branded = _avg_visibility(by_template.get("brand_direct", []))
+    # No brand_direct any more — GEO measures category, not branded search
     category = _avg_visibility(by_template.get("category_discovery", []))
     competitor = _avg_visibility(by_template.get("competitor_comparison", []))
     review = _avg_visibility(by_template.get("brand_review", []))
@@ -501,63 +503,34 @@ async def generate_report(db: AsyncSession, project_id: str) -> ProjectReport:
     user_comp = _avg_visibility(by_template.get("user_comparison", []))
     user_alt = _avg_visibility(by_template.get("user_alternatives", []))
 
-    # Compute engine-specific scores (separated by type)
+    # Compute engine-specific scores
     engine_scores = {}
-    search_engines = []
-    awareness_engines = []
     for eng, entries in by_engine.items():
         engine_scores[eng] = round(_avg_visibility(entries) * 100, 1)
-        # Determine engine type (check raw_response for awareness note)
-        is_awareness = any(
-            (e.raw_response or {}).get("note") == "base_llm_awareness"
-            for e in entries
-        )
-        if is_awareness or eng in ("deepseek", "doubao"):
-            awareness_engines.append(eng)
-        else:
-            search_engines.append(eng)
 
-    # Overall: average of template scores weighted by engine type
-    all_scores = [branded, category, competitor, review]
+    # Overall: average of all template scores
+    all_scores = [category, competitor, review]
     valid_scores = [s for s in all_scores if s > 0]
     if valid_scores:
         overall = sum(valid_scores) / len(valid_scores) * 100
     else:
         overall = 0.0
 
-    # Generate recommendations — distinguish search vs awareness
+    # Generate recommendations
     recommendations = []
 
-    # Search engine insights
+    # Search engine overall
     search_avg = (
-        sum(engine_scores.get(e, 0) for e in search_engines) / len(search_engines)
-        if search_engines else 0
-    )
-    awareness_avg = (
-        sum(engine_scores.get(e, 0) for e in awareness_engines) / len(awareness_engines)
-        if awareness_engines else 0
+        sum(engine_scores.get(e, 0) for e in by_engine) / len(by_engine)
+        if by_engine else 0
     )
 
-    if awareness_avg > 30:
-        recommendations.append(
-            f"✅ AI 大模型品牌认知度 {awareness_avg:.0f}%。品牌在 LLM 训练数据中有较好覆盖。"
-        )
-    elif awareness_avg > 0:
-        recommendations.append(
-            f"⚠️ AI 大模型品牌认知度仅 {awareness_avg:.0f}%。建议增加高质量公开内容（技术博客、文档、媒体报道）以提升训练数据覆盖。"
-        )
-
-    if search_avg < 20 and awareness_avg > 30:
-        recommendations.append(
-            f"⚠️ 搜索可见度 ({search_avg:.0f}%) 远低于 LLM 认知度 ({awareness_avg:.0f}%)。"
-            "品牌在 AI 模型中有知名度，但缺乏网页内容支撑。建议建设官网、技术博客、增加外部链接。"
-        )
-    elif search_avg < 20:
+    if search_avg < 20:
         recommendations.append(
             "网页搜索可见度低。建议加强品牌官网 SEO 基础建设（标题、描述、结构化数据）。"
         )
 
-    if branded < 0.1:
+    if category < 0.1:
         recommendations.append(
             "品牌直接搜索几乎不可见。需要创建品牌专属内容页面，至少让搜索引擎能找到品牌名。"
         )
@@ -599,7 +572,7 @@ async def generate_report(db: AsyncSession, project_id: str) -> ProjectReport:
     report = ProjectReport(
         project_id=project_id,
         overall_visibility=round(overall, 1),
-        branded_visibility=round(branded * 100, 1),
+        branded_visibility=0.0,  # Brand direct queries removed — GEO measures category, not branded search
         category_visibility=round(category * 100, 1),
         competitor_visibility=round(competitor * 100, 1),
         review_visibility=round(review * 100, 1),
