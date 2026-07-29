@@ -8,8 +8,14 @@ import asyncio
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
+from sqlalchemy import delete
 
-from services.database import async_session as db_session
+from services.database import (
+    ProbeResult,
+    ProjectReport,
+    SearchPrompt,
+    async_session as db_session,
+)
 from services.geo_projects import (
     confirm_prompts,
     create_project,
@@ -191,11 +197,21 @@ async def update_project_endpoint(project_id: str, body: UpdateProjectRequest):
 
 
 @router.post("/{project_id}/prompts")
-async def generate_prompts_endpoint(project_id: str):
+async def generate_prompts_endpoint(project_id: str, body: dict | None = None):
+    """Generate search prompts. If regenerate=True, delete old prompts first."""
     async with _get_db() as db:
         project = await get_project(db, project_id)
         if not project:
             raise HTTPException(status_code=404, detail="Project not found")
+
+        # If regenerate, clear old prompts
+        if body and body.get("regenerate"):
+            await db.execute(delete(SearchPrompt).where(SearchPrompt.project_id == project_id))
+            await db.execute(delete(ProbeResult).where(ProbeResult.project_id == project_id))
+            await db.execute(delete(ProjectReport).where(ProjectReport.project_id == project_id))
+            await update_project(db, project_id, status="interview")
+            await db.commit()
+            logger.info(f"Cleared old prompts/results for project {project_id}")
 
         prompts = await generate_search_prompts(db, project_id, lang=project.lang)
         return {
