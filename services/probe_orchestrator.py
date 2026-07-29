@@ -33,6 +33,8 @@ from services.geo_projects import (
     save_probe_result,
     update_project,
 )
+from services.protection import get_circuit
+from services.sanitizer import sanitize_llm_text
 
 logger = logging.getLogger("probe_orchestrator")
 

@@ -49,15 +49,28 @@ async def create_geo_audit(body: GeoAuditRequest):
     if not body.url:
         raise HTTPException(status_code=400, detail="url is required")
 
+    # Sanitize URL before processing
+    from services.sanitizer import sanitize_url
+    body.url = sanitize_url(body.url)
+    if not body.url:
+        raise HTTPException(status_code=400, detail="Invalid URL")
+
     job = await job_store.create("geo_audit")
 
-    # Fire background task
+    # Fire background task with supervision (won't crash the pod)
     async def _run():
         try:
+            await job_store.start(job.id)
             await run_geo_audit(job, body.url, body.keywords, body.probes)
+        except asyncio.CancelledError:
+            logger.warning(f"Job {job.id} cancelled (pod shutdown?)")
+            await job_store.fail(job.id, "Job cancelled — pod may be shutting down")
         except Exception as e:
             logger.exception(f"GEO audit job {job.id} failed: {e}")
-            await job_store.fail(job.id, str(e))
+            try:
+                await job_store.fail(job.id, f"Internal error: {type(e).__name__}")
+            except Exception:
+                logger.critical(f"Failed to record job failure for {job.id}")
 
     asyncio.create_task(_run())
 
@@ -79,8 +92,10 @@ async def create_geo_interview(body: GeoInterviewRequest):
 
     job = await job_store.create("geo_interview")
 
+    # Fire background task with supervision
     async def _run():
         try:
+            await job_store.start(job.id)
             await run_geo_interview(
                 job=job,
                 brand_name=body.brand_name,
@@ -89,9 +104,15 @@ async def create_geo_interview(body: GeoInterviewRequest):
                 previous_answers=body.previous_answers,
                 lang=body.lang,
             )
+        except asyncio.CancelledError:
+            logger.warning(f"Job {job.id} cancelled")
+            await job_store.fail(job.id, "Job cancelled")
         except Exception as e:
             logger.exception(f"GEO interview job {job.id} failed: {e}")
-            await job_store.fail(job.id, str(e))
+            try:
+                await job_store.fail(job.id, f"Internal error: {type(e).__name__}")
+            except Exception:
+                logger.critical(f"Failed to record job failure for {job.id}")
 
     asyncio.create_task(_run())
 

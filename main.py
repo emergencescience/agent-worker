@@ -16,6 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from routes import jobs, projects
 from services.async_jobs import job_store
+from services.protection import RateLimitMiddleware
 
 load_dotenv()
 
@@ -31,6 +32,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Rate limiting (30 req/60s per IP, /health exempt)
+app.add_middleware(RateLimitMiddleware)
 
 
 @app.on_event("startup")
