@@ -86,9 +86,21 @@ async def _probe_gemini(query: str, brand_name: str, own_domain: str) -> dict[st
 
     Uses Google Search grounding to get real-time search results,
     then measures if the brand appears in the grounded response.
+
+    The query is treated as a natural-language search question, not a keyword dump.
     """
     if not GEMINI_API_KEY:
         return None
+
+    # Build a natural-language prompt that triggers Google Search grounding.
+    # The query text (e.g. "月球种子工厂项目 推荐") is embedded in a full sentence
+    # so Google interprets it as a search intent, not a URL or keyword list.
+    search_prompt = (
+        f"Search the web for: \"{query}\". "
+        f"List what you find with URLs and brief descriptions. "
+        f"Be specific — mention company names, project names, and website addresses."
+    )
+
     try:
         async with httpx.AsyncClient(timeout=45.0) as client:
             resp = await client.post(
@@ -98,7 +110,7 @@ async def _probe_gemini(query: str, brand_name: str, own_domain: str) -> dict[st
                     "contents": [
                         {
                             "role": "user",
-                            "parts": [{"text": query}],
+                            "parts": [{"text": search_prompt}],
                         }
                     ],
                     "tools": [{"google_search": {}}],
@@ -185,11 +197,42 @@ async def _probe_deepseek(query: str, brand_name: str, own_domain: str) -> dict[
 
     Unlike search engines, DeepSeek has no grounding. We measure:
     - Does the LLM organically mention this brand when asked about the TOPIC?
-    - NOT: "what do you know about histrategy?" (that's prompting)
-    - YES: "what are good {category} tools?" → check if brand mentioned
+    - NOT: "what do you know about symbol.science?" (that triggers hallucination)
+    - YES: "what are good {category} projects?" → check if brand mentioned
+
+    IMPORTANT: If the query is just a bare brand name or URL (brand_direct template),
+    we reformulate it as a topic question to avoid circular hallucination scoring.
     """
     if not DEEPSEEK_API_KEY:
         return None
+
+    # Detect if query is just a bare brand/URL search (brand_direct style)
+    # These cause circular hallucination: "tell me about brand X" → LLM invents X
+    # → we count mentions of X → fake visibility score
+    is_bare_brand_query = (
+        " " not in query                          # single word/domain
+        or query.startswith("http://")
+        or query.startswith("https://")
+        or query == brand_name.lower()
+        or query == own_domain.lower()
+    )
+
+    if is_bare_brand_query:
+        # Reformulate as a topic discovery question
+        # Extract product name from URL path (e.g. "moon" from "symbol.science/moon")
+        product_hint = ""
+        if "/" in own_domain:
+            product_hint = own_domain.split("/")[-1]
+
+        awareness_prompt = (
+            f"I'm researching {product_hint or brand_name}. "
+            f"Tell me about notable companies, projects, and websites in this space. "
+            f"Be specific with names, URLs, and what each one does."
+        )
+    else:
+        # Query is already a topic/category search — use as-is
+        awareness_prompt = query
+
     try:
         async with httpx.AsyncClient(timeout=45.0) as client:
             resp = await client.post(
@@ -206,10 +249,10 @@ async def _probe_deepseek(query: str, brand_name: str, own_domain: str) -> dict[
                             "content": (
                                 "You are a helpful assistant. Answer the user's question "
                                 "with specific examples, brand names, and product names where relevant. "
-                                "Be factual and specific."
+                                "Be factual and specific. If you don't know something, say so."
                             ),
                         },
-                        {"role": "user", "content": query},
+                        {"role": "user", "content": awareness_prompt},
                     ],
                     "temperature": 0.3,
                     "max_tokens": 1024,
@@ -228,9 +271,35 @@ async def _probe_deepseek(query: str, brand_name: str, own_domain: str) -> dict[
 
 
 async def _probe_doubao(query: str, brand_name: str, own_domain: str) -> dict[str, Any] | None:
-    """Doubao awareness probe — measures brand recall in Chinese AI ecosystem."""
+    """Doubao awareness probe — measures brand recall in Chinese AI ecosystem.
+
+    Same principle as DeepSeek: reformulate bare brand queries as topic questions.
+    """
     if not DOUBAO_API_KEY:
         return None
+
+    # Same bare-brand detection as DeepSeek
+    is_bare_brand_query = (
+        " " not in query
+        or query.startswith("http://")
+        or query.startswith("https://")
+        or query == brand_name.lower()
+        or query == own_domain.lower()
+    )
+
+    if is_bare_brand_query:
+        product_hint = ""
+        if "/" in own_domain:
+            product_hint = own_domain.split("/")[-1]
+
+        awareness_prompt = (
+            f"我正在研究{product_hint or brand_name}领域。"
+            f"请告诉我这个领域有哪些知名的公司、项目和网站。"
+            f"请具体说明名称、网址和各自的特点。"
+        )
+    else:
+        awareness_prompt = query
+
     try:
         async with httpx.AsyncClient(timeout=45.0) as client:
             resp = await client.post(
@@ -246,10 +315,10 @@ async def _probe_doubao(query: str, brand_name: str, own_domain: str) -> dict[st
                             "role": "system",
                             "content": (
                                 "你是一个有帮助的助手。回答用户问题时请提供具体的例子、品牌名称和产品名称。"
-                                "实事求是，具体清晰。"
+                                "实事求是，具体清晰。不知道就说不知道。"
                             ),
                         },
-                        {"role": "user", "content": query},
+                        {"role": "user", "content": awareness_prompt},
                     ],
                     "temperature": 0.3,
                     "max_tokens": 1024,
@@ -363,6 +432,9 @@ def _analyze_engine_visibility(
         }
 
     brand_lower = brand_name.lower()
+    # Match both full path (e.g. "symbol.science/moon") and root domain ("symbol.science")
+    domain_root = own_domain.split("/")[0] if own_domain else ""
+    domain_roots = [own_domain, domain_root] if domain_root and domain_root != own_domain else [own_domain]
 
     if engine_type == "search" and engine == "tavily":
         # Tavily returns structured web results
@@ -380,7 +452,7 @@ def _analyze_engine_visibility(
             if brand_lower in title or brand_lower in content:
                 brand_mentions += 1
                 mention_positions.append(i + 1)
-            if own_domain and own_domain in url:
+            if own_domain and any(d in url for d in domain_roots):
                 has_own_domain = True
 
         top_results = []
@@ -424,7 +496,7 @@ def _analyze_engine_visibility(
         for r in results:
             url = (r.get("url", "") or "").lower()
             title = (r.get("title", "") or "").lower()
-            if own_domain and own_domain in url:
+            if own_domain and any(d in url for d in domain_roots):
                 has_own_domain = True
             if brand_lower in title:
                 brand_in_sources += 1

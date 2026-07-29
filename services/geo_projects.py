@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from datetime import datetime, timezone
@@ -87,56 +88,125 @@ async def list_projects(db: AsyncSession, user_id: str | None = None, limit: int
 
 # ── Search Prompt CRUD ──────────────────────────────────────────────
 
+# LLM-based query generation — turns project profile data into realistic search queries.
+# Previously we used naive lambda concatenation (e.g. f"best {industry} 推荐 2026"),
+# but `industry` contains raw interview free-text, producing garbage queries like
+# "best https://symbol.science/moon 是 月球种子工厂... 推荐 2026".
+# Now we use an LLM pass to extract a real query from the profile fields.
 
-SEARCH_TEMPLATES = {
-    "brand_direct": {
-        "label_zh": "品牌直接搜索",
-        "label_en": "Brand Direct Search",
-        "generate": lambda brand, **kw: f"{brand}",
-    },
-    "category_discovery": {
-        "label_zh": "品类发现搜索",
-        "label_en": "Category Discovery",
-        "generate": lambda brand, industry="", **kw: (
-            f"best {industry} 推荐 2026" if industry else f"best {brand} alternatives 2026"
-        ),
-    },
-    "competitor_comparison": {
-        "label_zh": "竞品对比搜索",
-        "label_en": "Competitor Comparison",
-        "generate": lambda brand, competitors=None, **kw: (
-            f"{brand} vs {competitors[0]}" if competitors else f"{brand} vs competitors"
-        ),
-    },
-    "brand_review": {
-        "label_zh": "品牌评价搜索",
-        "label_en": "Brand Review Search",
-        "generate": lambda brand, **kw: f"{brand} review 评测 用户体验",
-    },
+_QUERY_GEN_SYSTEM = """You are a search query generator. Given a brand/product profile,
+generate natural search queries that real users would type into Google or an AI search engine.
+
+Return ONLY valid JSON, no commentary:
+{
+  "brand_query": "a direct brand/product search query",
+  "category_query": "a category discovery query (e.g. 'best X for Y')",
+  "comparison_query": "a competitor comparison query",
+  "review_query": "a review/research query",
+  "user_discovery": "what a new user would search to discover this category",
+  "user_comparison": "how an evaluating user would compare",
+  "user_alternatives": "what a price-sensitive user would search for alternatives"
 }
 
-# User simulation prompts — what real users would actually search
-USER_SIMULATION_TEMPLATES = {
-    "user_discovery": {
-        "label_zh": "用户发现类查询",
-        "label_en": "User Discovery Query",
-        "generate": lambda brand, industry="", **kw: (
-            f"有没有好玩的{industry}推荐" if industry else f"类似{brand}的产品推荐"
-        ),
-    },
-    "user_comparison": {
-        "label_zh": "用户对比类查询",
-        "label_en": "User Comparison Query",
-        "generate": lambda brand, **kw: f"{brand} 怎么样 好不好用",
-    },
-    "user_alternatives": {
-        "label_zh": "用户替代品查询",
-        "label_en": "User Alternative Query",
-        "generate": lambda brand, industry="", **kw: (
-            f"{brand} 的替代品有哪些" if industry else f"除了{brand}还有什么选择"
-        ),
-    },
-}
+Rules:
+- Queries must be in the project's language (zh or en)
+- Queries must sound like something a REAL USER would type — short, natural, search-engine-like
+- Do NOT embed URLs in queries
+- Do NOT include the full brand description as part of the query
+- For category queries, extract the core product category (2-5 keywords), not the entire value prop
+- If given a full URL path like symbol.science/moon, treat 'moon' as the key product name
+- Make queries specific enough to find similar real-world projects/pages"""
+
+
+async def _generate_queries_with_llm(
+    brand_name: str,
+    website_url: str = "",
+    industry: str = "",
+    value_proposition: str = "",
+    target_audience: str = "",
+    competitors: list[str] | None = None,
+    lang: str = "zh",
+) -> dict[str, str]:
+    """Use LLM to generate realistic search queries from project profile."""
+    api_key = os.getenv("DEEPSEEK_API_KEY", "")
+    if not api_key:
+        return _fallback_queries(brand_name, website_url, industry, competitors, lang)
+
+    # Use the full URL path as the "brand key" for more accurate searching
+    brand_key = website_url.replace("https://", "").replace("http://", "").rstrip("/") if website_url else brand_name
+
+    profile = f"""Brand: {brand_name}
+Full URL: {website_url or 'N/A'}
+Industry/Category: {industry or 'N/A'}
+Value Proposition: {value_proposition or 'N/A'}
+Target Audience: {target_audience or 'N/A'}
+Competitors: {', '.join(competitors) if competitors else 'N/A'}
+Language: {lang}"""
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                "https://api.deepseek.com/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "deepseek-chat",
+                    "messages": [
+                        {"role": "system", "content": _QUERY_GEN_SYSTEM},
+                        {"role": "user", "content": profile},
+                    ],
+                    "temperature": 0.3,
+                    "max_tokens": 500,
+                    "response_format": {"type": "json_object"},
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            content = data["choices"][0]["message"]["content"]
+            parsed = json.loads(content)
+            return parsed
+    except Exception as e:
+        logger.warning(f"LLM query generation failed: {e}, using fallback")
+        return _fallback_queries(brand_name, website_url, industry, competitors, lang)
+
+
+def _fallback_queries(
+    brand_name: str,
+    website_url: str = "",
+    industry: str = "",
+    competitors: list[str] | None = None,
+    lang: str = "zh",
+) -> dict[str, str]:
+    """Fallback query generation without LLM — uses brand + URL path."""
+    # Extract path segment as product name (e.g. "moon" from "symbol.science/moon")
+    path = website_url.replace("https://", "").replace("http://", "").rstrip("/")
+    product_name = path.split("/")[-1].replace("-", " ").replace("_", " ") if "/" in path else brand_name
+
+    # Use full path for brand direct query
+    brand_query = path if "/" in path else brand_name
+
+    if lang == "zh":
+        return {
+            "brand_query": brand_query,
+            "category_query": f"{product_name} 项目 推荐" if product_name != brand_name else f"{brand_name} 类似项目",
+            "comparison_query": f"{product_name} vs {competitors[0]}" if competitors else f"{product_name} 对比",
+            "review_query": f"{product_name} 怎么样 测评",
+            "user_discovery": f"{product_name} 有哪些",
+            "user_comparison": f"{product_name} 好不好用",
+            "user_alternatives": f"{product_name} 替代方案",
+        }
+    else:
+        return {
+            "brand_query": brand_query,
+            "category_query": f"best {product_name} projects 2026" if product_name != brand_name else f"alternatives to {brand_name}",
+            "comparison_query": f"{product_name} vs {competitors[0]}" if competitors else f"{product_name} comparison",
+            "review_query": f"{product_name} review",
+            "user_discovery": f"what are good {product_name} tools",
+            "user_comparison": f"{product_name} worth it",
+            "user_alternatives": f"{product_name} alternatives",
+        }
 
 
 async def generate_search_prompts(
@@ -147,48 +217,62 @@ async def generate_search_prompts(
 ) -> list[SearchPrompt]:
     """Generate search prompts for a project based on its brand profile.
 
-    Creates both probe prompts (for visibility measurement) and
-    user simulation prompts (to model real user behavior).
+    Uses LLM to turn interview data into realistic user search queries,
+    NOT naive string concatenation. Falls back to URL-path-based queries
+    if LLM is unavailable.
     """
     project = await get_project(db, project_id)
     if not project:
         raise ValueError(f"Project {project_id} not found")
 
-    prompts = []
+    # Generate queries via LLM (with fallback)
+    queries = await _generate_queries_with_llm(
+        brand_name=project.brand_name,
+        website_url=project.website_url or "",
+        industry=project.industry or "",
+        value_proposition=project.value_proposition or "",
+        target_audience=project.target_audience or "",
+        competitors=project.competitors or [],
+        lang=lang,
+    )
 
-    # 1. Standard probe templates
-    for template_type, template in SEARCH_TEMPLATES.items():
-        query = template["generate"](
-            brand=project.brand_name,
-            industry=project.industry or "",
-            competitors=project.competitors or [],
-        )
+    # Map LLM output keys → standard template_type values
+    _TYPE_MAP = {
+        "brand_query": "brand_direct",
+        "category_query": "category_discovery",
+        "comparison_query": "competitor_comparison",
+        "review_query": "brand_review",
+        "user_discovery": "user_discovery",
+        "user_comparison": "user_comparison",
+        "user_alternatives": "user_alternatives",
+    }
+
+    prompts = []
+    probe_count = 0
+    sim_count = 0
+
+    for query_key, template_type in _TYPE_MAP.items():
+        query_text = queries.get(query_key, "")
+        if not query_text:
+            continue
+
+        is_simulation = query_key.startswith("user_")
+        if is_simulation and not include_user_simulation:
+            continue
+
         prompt = SearchPrompt(
             project_id=project_id,
             template_type=template_type,
-            query_text=query,
+            query_text=query_text,
             confirmed=False,
         )
         db.add(prompt)
         prompts.append(prompt)
 
-    # 2. User simulation templates — model what real users would search
-    if include_user_simulation:
-        for template_type, template in USER_SIMULATION_TEMPLATES.items():
-            query = template["generate"](
-                brand=project.brand_name,
-                industry=project.industry or "",
-                competitors=project.competitors or [],
-                value_proposition=project.value_proposition or "",
-            )
-            prompt = SearchPrompt(
-                project_id=project_id,
-                template_type=template_type,
-                query_text=query,
-                confirmed=False,
-            )
-            db.add(prompt)
-            prompts.append(prompt)
+        if is_simulation:
+            sim_count += 1
+        else:
+            probe_count += 1
 
     await db.commit()
     for p in prompts:
@@ -196,7 +280,7 @@ async def generate_search_prompts(
 
     logger.info(
         f"Generated {len(prompts)} search prompts for project {project_id}"
-        f" ({len(SEARCH_TEMPLATES)} probe + {len(USER_SIMULATION_TEMPLATES)} user simulation)"
+        f" ({probe_count} probe + {sim_count} user simulation)"
     )
     return prompts
 
