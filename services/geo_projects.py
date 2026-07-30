@@ -94,33 +94,44 @@ async def list_projects(db: AsyncSession, user_id: str | None = None, limit: int
 # "best https://symbol.science/moon 是 月球种子工厂... 推荐 2026".
 # Now we use an LLM pass to extract a real query from the profile fields.
 
-_QUERY_GEN_SYSTEM = """You are a search query generator for GEO (Generative Engine Optimization) testing.
+_QUERY_GEN_SYSTEM = """You are a search query generator for GEO (Generative Engine Optimization) visibility testing.
 
-GIVEN a brand/product profile, generate search queries that a REAL USER would type —
+GIVEN a brand/product profile, generate NATURAL, LONG-FORM search queries that a REAL USER would type —
 but NEVER include the brand name, website, or product name in the queries.
+
+CRITICAL: These queries are used as "probe queries" — they test whether the brand's website appears
+in AI search engines (Tavily, Gemini grounding) when users search for relevant CATEGORY terms.
+Industry term: "GEO probe queries" / "AI visibility test queries" / "LLM search probes".
 
 The test measures: "If a user searches for CATEGORY terms, does the brand appear?"
 If the query contains the brand name, the test is invalid — we're measuring SEO, not GEO.
 
 Return ONLY valid JSON:
 {
-  "category_query": "category discovery query (e.g. 'best tools for X', NOT brand-specific)",
-  "comparison_query": "comparison query about competing options in the space",
-  "review_query": "review/opinion query about the category or problem",
-  "user_discovery": "what a new user would search to discover this type of product",
-  "user_comparison": "how an evaluating user would compare options in this space",
-  "user_alternatives": "what a price-sensitive user would search for cheaper/different options"
+  "category_query": "Long natural category query (8-15+ words, like '2026年最好的开源AI历史策略游戏推荐')",
+  "comparison_query": "Long comparison query about competing options in the space",
+  "review_query": "Long review/opinion query about the category or problem space",
+  "user_discovery": "Long query a new user would type to discover this type of product",
+  "user_comparison": "Long query comparing options with specific requirements",
+  "user_alternatives": "Long query for alternatives with specific constraints"
 }
 
-RULES (CRITICAL):
+FORMAT REQUIREMENTS:
 - Output language must match the project language (zh or en)
 - NEVER include the brand name, domain, or product name in ANY query
 - NEVER include URLs in queries
-- Queries must be what REAL USERS type — short, natural, search-engine-like (3-8 words)
-- Extract the core product category/problem (2-5 keywords), use that
-- For 'moon seed factory' category, queries like '月球殖民 自我复制 项目' or 'moon colony von neumann probe'
-- NOT 'symbol.science moon' or 'symbol.science alternatives'
-- Make queries specific enough to find similar real-world projects/pages"""
+- Queries MUST be 8-20 words — natural, conversational, like a real person typing into Google or an AI chatbot
+- NOT short 3-word queries like '历史策略游戏' — make them SPECIFIC and DESCRIPTIVE
+- Include qualifiers: use case, audience, feature requirements, budget constraints, etc.
+- Chinese queries should use natural Chinese sentence patterns, not keyword stuffing
+- Each query should be UNIQUE — don't just rephrase the same thing
+
+EXAMPLE good queries:
+  zh: "2025年有什么好玩的AI驱动的多人历史策略游戏推荐"
+  zh: "类似文明6但带有真实历史模拟和LLM生成剧情的策略游戏"
+  en: "best open source AI powered historical strategy games with multiplayer 2025"
+  en: "strategy games where AI generates realistic historical narratives and scenarios"
+"""
 
 
 async def _generate_queries_with_llm(
@@ -184,31 +195,27 @@ def _fallback_queries(
     competitors: list[str] | None = None,
     lang: str = "zh",
 ) -> dict[str, str]:
-    """Fallback query generation without LLM — uses brand + URL path."""
-    # Extract path segment as product name (e.g. "moon" from "symbol.science/moon")
-    path = website_url.replace("https://", "").replace("http://", "").rstrip("/")
-    product_name = path.split("/")[-1].replace("-", " ").replace("_", " ") if "/" in path else brand_name
-
-    # Use full path for brand direct query
-    brand_query = path if "/" in path else brand_name
+    """Fallback query generation without LLM — uses category/industry keywords."""
+    # Use industry as the category descriptor if available
+    category_words = industry if industry else brand_name
 
     if lang == "zh":
         return {
-            "category_query": f"{product_name} 项目 推荐 2026",
-            "comparison_query": f"{product_name} 对比 有哪些选择",
-            "review_query": f"{product_name} 测评 哪个好",
-            "user_discovery": f"{product_name} 怎么找",
-            "user_comparison": f"{product_name} 好不好 值得吗",
-            "user_alternatives": f"{product_name} 替代方案 平替",
+            "category_query": f"2025年最好的{category_words}推荐和评测",
+            "comparison_query": f"{category_words}有哪些选择 对比评测 优缺点",
+            "review_query": f"{category_words}好不好用 真实用户评价和体验分享",
+            "user_discovery": f"想找一个好用的{category_words} 有什么推荐吗",
+            "user_comparison": f"{category_words}哪个最好 性价比对比 2025",
+            "user_alternatives": f"{category_words}的替代方案 免费或便宜的选择",
         }
     else:
         return {
-            "category_query": f"best {product_name} projects 2026",
-            "comparison_query": f"{product_name} comparison alternatives",
-            "review_query": f"{product_name} review worth it",
-            "user_discovery": f"how to find {product_name} tools",
-            "user_comparison": f"{product_name} worth it reddit",
-            "user_alternatives": f"{product_name} alternatives cheaper",
+            "category_query": f"best {category_words} recommendations and reviews 2025",
+            "comparison_query": f"{category_words} comparison which one is best pros and cons",
+            "review_query": f"{category_words} honest review real user experience worth it",
+            "user_discovery": f"looking for a good {category_words} what do you recommend",
+            "user_comparison": f"best {category_words} compared side by side 2025",
+            "user_alternatives": f"{category_words} alternatives free or cheaper options available",
         }
 
 
